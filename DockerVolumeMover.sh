@@ -43,6 +43,18 @@ then
     src="${src::-1}"
 fi
 
+if [ -L $src ]
+then
+  echo "The source is a symbolic link. Please check if the docker containers have already been moved."
+  exit
+fi
+
+if [ -d "${dst}/docker" ] || [ -L "${dst}/docker" ]
+then
+  echo "The destination dir has a subdir called 'docker'. To avoid unsafe overwriting, please move it to somewhere else or remove it before executing this script."
+  exit
+fi
+
 if [ $fflag -eq 0 ]
 then
     read -p "Are you sure to move the docker containers from ${src} to ${dst} ? (y/n): " yn
@@ -54,14 +66,6 @@ then
     esac
 fi
 
-
-if [ -L $src ]
-then
-  echo "The source is a symbolic link. Please check if the docker containers have already been moved."
-  exit
-fi
-
-
 echo Docker containers are being moved ... 
 
 #Create the destination directory and set the permission
@@ -69,21 +73,40 @@ if [ ! -d "$dst" ]
 then
   mkdir -p $dst
 fi
-
 chown root:root $dst && chmod 701 $dst
 
-#Stop the docker containers and docker daemon.
-docker stop $(docker ps -q)
-systemctl stop docker
-
-#Create service folder and config file.
-serv_path="/etc/systemd/system/docker.service.d"
-mkdir -p $serv_path
-cat > "${serv_path}/docker.conf" << EOF
-[Service]
-ExecStart=
-ExecStart=/usr/bin/dockerd -g $dst/docker/
-EOF
+#Stop the running containers if any and the docker daemon.
+exitNext=0
+while true
+do
+  dockerstatus=$(systemctl is-active docker)
+  #if docker is running, kill process and break out
+  if [ "$dockerstatus" == "active" ]
+  then
+    containers=$(docker ps -q)
+    if [ ${#containers} -ne 0 ]
+    then
+      docker stop $containers
+    fi
+    systemctl stop docker
+    break
+  #if not, check if docker is loading: 
+  #if not loading, check process one more time, if not active then break out; 
+  #if it's loading, wait for 3 secs and try again
+  else
+    if [ ${exitNext} == 1 ]
+    then
+      break
+    fi
+    systemctl list-jobs | grep docker
+    isLoading=$?
+    if [ ${isLoading} != 0 ]
+    then
+      exitNext=1
+    fi
+    sleep 3
+  fi
+done
 
 #Reload the docker daemon config
 systemctl daemon-reload
@@ -95,5 +118,6 @@ mv ${src}/ ${dst}/
 ln -s $dst/docker $src
 
 #Start docker daemon
+systemctl enable docker
 systemctl start docker
 echo Done!
